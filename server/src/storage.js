@@ -2,7 +2,9 @@ const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 
-const DATA_DIR = path.join(__dirname, '../data');
+const DATA_DIR = process.env.WHITEBOARD_DATA_DIR
+  ? path.resolve(process.env.WHITEBOARD_DATA_DIR)
+  : path.join(__dirname, '../data');
 const BOARDS_FILE = path.join(DATA_DIR, 'boards.json');
 
 const ensureDataDir = () => {
@@ -35,6 +37,51 @@ const writeBoards = (boards) => {
   }
 };
 
+const matchCondition = (board, condition) => {
+  // Nested $or / $and
+  if (condition.$or) {
+    return condition.$or.some((sub) => matchCondition(board, sub));
+  }
+  if (condition.$and) {
+    return condition.$and.every((sub) => matchCondition(board, sub));
+  }
+  return Object.entries(condition).every(([key, value]) => {
+    const boardValue = board[key];
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      if (value.$in !== undefined) {
+        return Array.isArray(boardValue) && value.$in.some((v) => boardValue.includes(v));
+      }
+      if (value.$regex) {
+        const flags = value.$options || '';
+        return typeof boardValue === 'string' && new RegExp(value.$regex, flags).test(boardValue);
+      }
+      if (value.$gte !== undefined) {
+        return new Date(boardValue).getTime() >= new Date(value.$gte).getTime();
+      }
+      if (value.$lte !== undefined) {
+        return new Date(boardValue).getTime() <= new Date(value.$lte).getTime();
+      }
+    }
+    if (Array.isArray(boardValue)) {
+      // e.g. query { collaborators: 'user-2' } matches a board whose
+      // collaborators array contains 'user-2'
+      return boardValue.includes(value);
+    }
+    if (Array.isArray(value)) {
+      return value.includes(boardValue);
+    }
+    return boardValue === value;
+  });
+};
+
+const sortByField = (list, sort = {}) => {
+  const [field, dirRaw] = Object.entries(sort)[0] || ['updatedAt', -1];
+  const dir = dirRaw === 1 || dirRaw === 'asc' ? 1 : -1;
+  return [...list].sort(
+    (a, b) => (new Date(a[field]).getTime() - new Date(b[field]).getTime()) * dir
+  );
+};
+
 class LocalBoard {
   constructor(data) {
     this._id = data._id || uuidv4();
@@ -45,6 +92,8 @@ class LocalBoard {
     this.width = data.width || 3000;
     this.height = data.height || 2000;
     this.backgroundColor = data.backgroundColor || '#ffffff';
+    this.category = data.category || 'general';
+    this.deletedAt = data.deletedAt || null;
     this.createdAt = data.createdAt || new Date().toISOString();
     this.updatedAt = data.updatedAt || new Date().toISOString();
   }
@@ -59,13 +108,18 @@ class LocalBoard {
       width: this.width,
       height: this.height,
       backgroundColor: this.backgroundColor,
+      category: this.category,
+      deletedAt: this.deletedAt,
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,
     };
   }
 
   async save() {
-    this.updatedAt = new Date().toISOString();
+    // Honor explicitly provided timestamps (e.g. boards created from imported
+    // data / templates); otherwise stamp with the current time.
+    this.updatedAt = this.updatedAt || new Date().toISOString();
+    this.createdAt = this.createdAt || new Date().toISOString();
     const boards = readBoards();
     const existingIndex = boards.findIndex((b) => b._id === this._id);
 
@@ -80,44 +134,77 @@ class LocalBoard {
     return this.toObject();
   }
 
-  static find(query = {}) {
+  // Active (non-trashed) boards only. Pass { includeDeleted: true } to see all.
+  static find(query = {}, options = {}) {
     const boards = readBoards();
-    let result = [...boards];
+    let result = boards.filter((b) => options.includeDeleted || !b.deletedAt);
 
-    if (query.$or) {
-      result = result.filter((board) => {
-        return query.$or.some((condition) => {
-          if (condition.ownerId !== undefined) {
-            return board.ownerId === condition.ownerId;
-          }
-          if (condition.collaborators !== undefined) {
-            return board.collaborators && board.collaborators.includes(condition.collaborators);
-          }
-          return true;
-        });
-      });
-    } else if (query.ownerId !== undefined) {
-      result = result.filter((b) => b.ownerId === query.ownerId);
-    } else if (query._id !== undefined) {
-      result = result.filter((b) => b._id === query._id);
+    if (Object.keys(query).length > 0) {
+      const rootCondition = query.$or
+        ? { $or: query.$or }
+        : query.$and
+        ? { $and: query.$and }
+        : query;
+      result = result.filter((board) => matchCondition(board, rootCondition));
     }
 
-    result.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+    result = sortByField(result, options.sort);
 
     return {
-      sort: () => ({
-        exec: async () => result,
-        then: (resolve) => Promise.resolve(result).then(resolve),
-      }),
+      sort: (sort) => {
+        result = sortByField(result, sort);
+        return {
+          exec: async () => result,
+          then: (resolve) => Promise.resolve(result).then(resolve),
+        };
+      },
       exec: async () => result,
       then: (resolve) => Promise.resolve(result).then(resolve),
     };
   }
 
-  static async findById(id) {
+  // Boards in a user's recycle bin, with name / collaborator / creation-time filters
+  // and deletion-time ordering.
+  static async findTrash({
+    ownerId,
+    name,
+    collaborator,
+    createdFrom,
+    createdTo,
+    sort = { deletedAt: -1 },
+  } = {}) {
+    const boards = readBoards().filter((b) => b.deletedAt && b.ownerId === ownerId);
+
+    let result = boards;
+    if (name) {
+      const keyword = name.trim().toLowerCase();
+      result = result.filter((b) => b.name.toLowerCase().includes(keyword));
+    }
+    if (collaborator) {
+      result = result.filter(
+        (b) => Array.isArray(b.collaborators) && b.collaborators.includes(collaborator)
+      );
+    }
+    if (createdFrom) {
+      const from = new Date(createdFrom).getTime();
+      result = result.filter((b) => new Date(b.createdAt).getTime() >= from);
+    }
+    if (createdTo) {
+      // Make an inclusive end-of-day style bound when only a date is provided
+      const raw = String(createdTo);
+      const to = new Date(raw.length === 10 ? `${raw}T23:59:59.999Z` : createdTo).getTime();
+      result = result.filter((b) => new Date(b.createdAt).getTime() <= to);
+    }
+
+    return sortByField(result, sort);
+  }
+
+  static async findById(id, options = {}) {
     const boards = readBoards();
     const board = boards.find((b) => b._id === id);
-    return board || null;
+    if (!board) return null;
+    if (!options.includeDeleted && board.deletedAt) return null;
+    return board;
   }
 
   static async findByIdAndUpdate(id, updates, options = {}) {
@@ -153,6 +240,82 @@ class LocalBoard {
     console.log(`[Storage] Deleted board: ${id}`);
     return deleted;
   }
+
+  // Soft delete: move the owner's board into the recycle bin.
+  // Returns:
+  //   { status: 'trashed', board }      - newly moved to trash
+  //   { status: 'already-trashed', board } - idempotent repeat call
+  //   null                               - board does not exist
+  //   { status: 'forbidden' }            - caller is not the owner
+  // On write failure the on-disk record is left untouched and the error is rethrown.
+  static async softDelete(id, ownerId) {
+    const boards = readBoards();
+    const index = boards.findIndex((b) => b._id === id);
+    if (index < 0) return null;
+
+    const board = boards[index];
+    if (board.ownerId !== ownerId) return { status: 'forbidden' };
+    if (board.deletedAt) return { status: 'already-trashed', board };
+
+    const updated = { ...board, deletedAt: new Date().toISOString() };
+    boards[index] = updated;
+    writeBoards(boards); // throws -> original file content preserved
+    console.log(`[Storage] Moved board to trash: ${id}`);
+    return { status: 'trashed', board: updated };
+  }
+
+  // Restore a board from the recycle bin. Original category, collaborators and
+  // updatedAt are preserved verbatim. Returns:
+  //   { status: 'restored', board }
+  //   { status: 'not-trashed', board } - idempotent repeat restore, no duplicate
+  //   null                              - record missing
+  //   { status: 'forbidden' }
+  static async restore(id, ownerId) {
+    const boards = readBoards();
+    const index = boards.findIndex((b) => b._id === id);
+    if (index < 0) return null;
+
+    const board = boards[index];
+    if (board.ownerId !== ownerId) return { status: 'forbidden' };
+    if (!board.deletedAt) return { status: 'not-trashed', board };
+
+    const restored = { ...board, deletedAt: null };
+    boards[index] = restored;
+    writeBoards(boards); // throws -> record remains in trash and can be retried
+    console.log(`[Storage] Restored board from trash: ${id}`);
+    return { status: 'restored', board: restored };
+  }
+
+  // Permanently remove a single trashed board owned by ownerId.
+  // Mirrors softDelete/restore return conventions; a failed write keeps the record.
+  static async permanentDelete(id, ownerId) {
+    const boards = readBoards();
+    const index = boards.findIndex((b) => b._id === id);
+    if (index < 0) return null;
+
+    const board = boards[index];
+    if (board.ownerId !== ownerId) return { status: 'forbidden' };
+    if (!board.deletedAt) return { status: 'not-trashed', board };
+
+    const remaining = boards.filter((b) => b._id !== id);
+    writeBoards(remaining); // throws -> file untouched, record preserved
+    console.log(`[Storage] Permanently deleted board: ${id}`);
+    return { status: 'deleted', board };
+  }
+
+  // Permanently remove every trashed board owned by ownerId.
+  // The write is one atomic replacement, so a failure leaves all records in place
+  // and the caller can resubmit.
+  static async emptyTrash(ownerId) {
+    const boards = readBoards();
+    const trashed = boards.filter((b) => b.deletedAt && b.ownerId === ownerId);
+    if (trashed.length === 0) return { deletedCount: 0, boards: [] };
+
+    const remaining = boards.filter((b) => !(b.deletedAt && b.ownerId === ownerId));
+    writeBoards(remaining); // throws -> nothing is removed
+    console.log(`[Storage] Emptied trash for ${ownerId}: ${trashed.length} board(s)`);
+    return { deletedCount: trashed.length, boards: trashed };
+  }
 }
 
 const initStorage = () => {
@@ -165,4 +328,6 @@ const initStorage = () => {
 module.exports = {
   Board: LocalBoard,
   initStorage,
+  // exported for tests
+  _internal: { readBoards, writeBoards, BOARDS_FILE, matchCondition, sortByField },
 };

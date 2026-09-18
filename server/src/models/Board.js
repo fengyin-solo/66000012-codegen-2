@@ -15,7 +15,12 @@ const boardSchema = new mongoose.Schema({
   layers: [layerSchema],
   width: { type: Number, default: 3000 },
   height: { type: Number, default: 2000 },
-  backgroundColor: { type: String, default: '#ffffff' }
+  backgroundColor: { type: String, default: '#ffffff' },
+  // Dashboard category; preserved across trash -> restore cycles
+  category: { type: String, default: 'general' },
+  // Soft-delete marker: set when the owner moves the board to the recycle bin.
+  // null/absent means the board is active.
+  deletedAt: { type: Date, default: null }
 }, { timestamps: true });
 
 module.exports = mongoose.model('Board', boardSchema);

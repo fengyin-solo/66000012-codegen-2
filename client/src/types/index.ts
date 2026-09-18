@@ -31,6 +31,9 @@ export interface Board {
   width: number;
   height: number;
   backgroundColor: string;
+  category?: string;
+  /** ISO timestamp when the board was moved to the recycle bin; null when active */
+  deletedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }

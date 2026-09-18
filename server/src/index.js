@@ -41,4 +41,4 @@ httpServer.listen(PORT, () => {
   console.log(`Using local file storage (no external database required)`);
 });
 
-module.exports = { app, io };
+module.exports = { app, io, httpServer };

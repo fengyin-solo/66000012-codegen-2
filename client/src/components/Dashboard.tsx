@@ -3,6 +3,7 @@ import { Board } from '../types';
 import { boardApi, templateApi } from '../services/api';
 import { useWhiteboardStore } from '../store/whiteboard';
 import { TemplateCenter } from './TemplateCenter';
+import { TrashView } from './TrashView';
 
 interface DashboardProps {
   onBoardSelect: (board: Board) => void;
@@ -39,10 +40,14 @@ const BoardCard: React.FC<{
   board: Board;
   index: number;
   onClick: () => void;
-}> = ({ board, index, onClick }) => {
+  onTrash?: () => void;
+}> = ({ board, index, onClick, onTrash }) => {
+  const [confirming, setConfirming] = useState(false);
+
   return (
     <div
       onClick={onClick}
+      className="board-card-wrap"
       style={{
         background: '#fff',
         borderRadius: '12px',
@@ -50,6 +55,7 @@ const BoardCard: React.FC<{
         cursor: 'pointer',
         overflow: 'hidden',
         transition: 'transform 0.2s, box-shadow 0.2s',
+        position: 'relative',
       }}
       onMouseEnter={(e) => {
         e.currentTarget.style.transform = 'translateY(-4px)';
@@ -58,8 +64,100 @@ const BoardCard: React.FC<{
       onMouseLeave={(e) => {
         e.currentTarget.style.transform = 'translateY(0)';
         e.currentTarget.style.boxShadow = '0 2px 8px rgba(0, 0, 0, 0.08)';
+        setConfirming(false);
       }}
     >
+      {onTrash && (
+        <div
+          style={{
+            position: 'absolute',
+            top: '8px',
+            right: '8px',
+            display: 'flex',
+            gap: '6px',
+            zIndex: 2,
+          }}
+        >
+          {confirming ? (
+            <>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onTrash();
+                  setConfirming(false);
+                }}
+                onMouseLeave={() => setConfirming(false)}
+                style={{
+                  padding: '4px 8px',
+                  fontSize: '11px',
+                  fontWeight: 500,
+                  color: '#fff',
+                  background: '#dc2626',
+                  border: 'none',
+                  borderRadius: '6px',
+                  cursor: 'pointer',
+                }}
+              >
+                确认删除
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setConfirming(false);
+                }}
+                style={{
+                  padding: '4px 8px',
+                  fontSize: '11px',
+                  fontWeight: 500,
+                  color: '#374151',
+                  background: 'rgba(255,255,255,0.95)',
+                  border: 'none',
+                  borderRadius: '6px',
+                  cursor: 'pointer',
+                }}
+              >
+                取消
+              </button>
+            </>
+          ) : (
+            <button
+              title="移到回收站"
+              onClick={(e) => {
+                e.stopPropagation();
+                setConfirming(true);
+              }}
+              style={{
+                width: '30px',
+                height: '30px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#fff',
+                background: 'rgba(0, 0, 0, 0.35)',
+                border: 'none',
+                borderRadius: '8px',
+                cursor: 'pointer',
+                transition: 'opacity 0.2s, background 0.2s',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = '#dc2626';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = 'rgba(0, 0, 0, 0.35)';
+              }}
+              // Hidden until the card is hovered (.board-card-wrap:hover)
+              className="board-trash-btn"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                <path d="M10 11v6M14 11v6" />
+                <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+              </svg>
+            </button>
+          )}
+        </div>
+      )}
       <div
         style={{
           height: '120px',
@@ -133,6 +231,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ onBoardSelect }) => {
   const [boards, setBoards] = useState<Board[]>([]);
   const [loading, setLoading] = useState(true);
   const [isTemplateCenterOpen, setIsTemplateCenterOpen] = useState(false);
+  const [showTrash, setShowTrash] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [trashError, setTrashError] = useState<string | null>(null);
   const username = useWhiteboardStore((state) => state.username);
 
   const userId = 'user-1';
@@ -140,6 +241,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ onBoardSelect }) => {
   useEffect(() => {
     loadBoards();
   }, []);
+
+  useEffect(() => {
+    if (notice) {
+      const timer = setTimeout(() => setNotice(null), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [notice]);
 
   const loadBoards = async () => {
     try {
@@ -172,6 +280,26 @@ export const Dashboard: React.FC<DashboardProps> = ({ onBoardSelect }) => {
       alert('创建白板失败，请重试');
     }
   };
+
+  // Soft delete: the owner's board moves to the recycle bin. Repeated clicks
+  // are idempotent on the server, so no duplicate record can appear.
+  const handleMoveToTrash = async (board: Board) => {
+    try {
+      setTrashError(null);
+      const ok = await boardApi.deleteBoard(board._id, userId);
+      if (!ok) throw new Error('delete failed');
+      setBoards((list) => list.filter((b) => b._id !== board._id));
+      setNotice(`已将「${board.name}」移入回收站，可在回收站中恢复`);
+    } catch (error) {
+      console.error('Failed to move board to trash:', error);
+      // The original board remains in place; user can try again
+      setTrashError(`删除「${board.name}」失败，原白板已保留，请重试`);
+    }
+  };
+
+  if (showTrash) {
+    return <TrashView userId={userId} onBack={() => setShowTrash(false)} />;
+  }
 
   const myBoards = boards.filter((b) => b.ownerId === userId);
   const sharedBoards = boards.filter((b) => b.ownerId !== userId);
@@ -214,8 +342,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ onBoardSelect }) => {
     </div>
   );
 
-  const BoardGrid: React.FC<{ boards: Board[]; loading?: boolean }> = ({ boards: boardList, loading }) => {
-    if (loading) {
+  const BoardGrid: React.FC<{ boards: Board[]; loading?: boolean; owned?: boolean }> = ({
+    boards: boardList,
+    loading: gridLoading,
+    owned,
+  }) => {
+    if (gridLoading) {
       return (
         <div
           style={{
@@ -279,6 +411,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ onBoardSelect }) => {
             board={board}
             index={index}
             onClick={() => onBoardSelect(board)}
+            onTrash={
+              owned || board.ownerId === userId ? () => handleMoveToTrash(board) : undefined
+            }
           />
         ))}
       </div>
@@ -296,6 +431,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ onBoardSelect }) => {
         @keyframes pulse {
           0%, 100% { opacity: 1; }
           50% { opacity: 0.5; }
+        }
+        .board-trash-btn {
+          opacity: 0;
+        }
+        .board-card-wrap:hover .board-trash-btn,
+        .board-trash-btn:focus-visible {
+          opacity: 1;
         }
       `}</style>
 
@@ -357,6 +499,38 @@ export const Dashboard: React.FC<DashboardProps> = ({ onBoardSelect }) => {
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
             <button
+              onClick={() => setShowTrash(true)}
+              title="回收站"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '8px 14px',
+                fontSize: '14px',
+                fontWeight: 500,
+                color: '#374151',
+                background: '#f3f4f6',
+                border: 'none',
+                borderRadius: '8px',
+                cursor: 'pointer',
+                transition: 'background 0.2s',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = '#e5e7eb';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = '#f3f4f6';
+              }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                <path d="M10 11v6M14 11v6" />
+                <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+              </svg>
+              回收站
+            </button>
+            <button
               onClick={() => setIsTemplateCenterOpen(true)}
               style={{
                 display: 'flex',
@@ -406,6 +580,36 @@ export const Dashboard: React.FC<DashboardProps> = ({ onBoardSelect }) => {
       </header>
 
       <main style={{ maxWidth: '1280px', margin: '0 auto', padding: '32px' }}>
+        {notice && (
+          <div
+            style={{
+              marginBottom: '16px',
+              padding: '10px 16px',
+              background: '#ecfdf5',
+              border: '1px solid #a7f3d0',
+              borderRadius: '8px',
+              color: '#065f46',
+              fontSize: '13px',
+            }}
+          >
+            {notice}
+          </div>
+        )}
+        {trashError && (
+          <div
+            style={{
+              marginBottom: '16px',
+              padding: '10px 16px',
+              background: '#fef2f2',
+              border: '1px solid #fecaca',
+              borderRadius: '8px',
+              color: '#991b1b',
+              fontSize: '13px',
+            }}
+          >
+            {trashError}
+          </div>
+        )}
         <div
           style={{
             background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
@@ -461,7 +665,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onBoardSelect }) => {
 
         <section style={{ marginBottom: '40px' }}>
           <SectionHeader title="我创建的" count={loading ? undefined : myBoards.length} />
-          <BoardGrid boards={myBoards} loading={loading && boards.length === 0} />
+          <BoardGrid boards={myBoards} loading={loading && boards.length === 0} owned />
         </section>
 
         <section>
