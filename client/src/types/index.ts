@@ -33,6 +33,22 @@ export interface Board {
   backgroundColor: string;
   createdAt: string;
   updatedAt: string;
+  deletedAt?: string | null;
+}
+
+export interface TrashFilters {
+  name?: string;
+  collaborator?: string;
+  createdFrom?: string;
+  createdTo?: string;
+}
+
+export type TrashSort = 'deletedAt-desc' | 'deletedAt-asc';
+
+export interface ApiErrorPayload {
+  error: string;
+  code?: string;
+  board?: Board;
 }
 
 export type ViewType = 'dashboard' | 'board';

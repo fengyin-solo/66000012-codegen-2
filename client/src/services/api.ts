@@ -1,4 +1,4 @@
-import { Board, Template } from '../types';
+import { Board, Template, TrashFilters, TrashSort } from '../types';
 
 const API_BASE_URL = '/api/boards';
 const TEMPLATE_API_URL = '/api/templates';
@@ -36,9 +36,76 @@ export const boardApi = {
     return response.json();
   },
 
-  async deleteBoard(boardId: string): Promise<boolean> {
-    const response = await fetch(`${API_BASE_URL}/${boardId}`, { method: 'DELETE' });
-    return response.ok;
+  async deleteBoard(boardId: string, userId: string): Promise<{ ok: boolean; status: number; board?: Board }> {
+    const response = await fetch(`${API_BASE_URL}/${boardId}?userId=${encodeURIComponent(userId)}`, {
+      method: 'DELETE',
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(data.error || 'Failed to delete board') as Error & {
+        status: number;
+        code?: string;
+      };
+      error.status = response.status;
+      error.code = data.code;
+      throw error;
+    }
+    return { ok: true, status: response.status, board: data.board };
+  },
+
+  async getTrashBoards(
+    userId: string,
+    filters: TrashFilters = {},
+    sort: TrashSort = 'deletedAt-desc'
+  ): Promise<Board[]> {
+    const params = new URLSearchParams({ userId, sort });
+    if (filters.name?.trim()) params.set('name', filters.name.trim());
+    if (filters.collaborator?.trim()) params.set('collaborator', filters.collaborator.trim());
+    if (filters.createdFrom) params.set('createdFrom', filters.createdFrom);
+    if (filters.createdTo) params.set('createdTo', filters.createdTo);
+
+    const response = await fetch(`${API_BASE_URL}/trash/list?${params.toString()}`);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || 'Failed to fetch recycle bin');
+    }
+    return response.json();
+  },
+
+  async restoreBoard(boardId: string, userId: string): Promise<Board | null> {
+    const response = await fetch(`${API_BASE_URL}/${boardId}/restore?userId=${encodeURIComponent(userId)}`, {
+      method: 'POST',
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(data.error || 'Failed to restore board') as Error & {
+        status: number;
+        code?: string;
+        board?: Board;
+      };
+      error.status = response.status;
+      error.code = data.code;
+      error.board = data.board;
+      throw error;
+    }
+    return data;
+  },
+
+  async purgeBoard(boardId: string, userId: string): Promise<boolean> {
+    const response = await fetch(`${API_BASE_URL}/${boardId}/purge?userId=${encodeURIComponent(userId)}`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      const error = new Error(data.error || 'Failed to permanently delete board') as Error & {
+        status: number;
+        code?: string;
+      };
+      error.status = response.status;
+      error.code = data.code;
+      throw error;
+    }
+    return true;
   },
 
   getMockBoards(): Board[] {

@@ -15,7 +15,8 @@ const boardSchema = new mongoose.Schema({
   layers: [layerSchema],
   width: { type: Number, default: 3000 },
   height: { type: Number, default: 2000 },
-  backgroundColor: { type: String, default: '#ffffff' }
+  backgroundColor: { type: String, default: '#ffffff' },
+  deletedAt: { type: Date, default: null }
 }, { timestamps: true });
 
 module.exports = mongoose.model('Board', boardSchema);
